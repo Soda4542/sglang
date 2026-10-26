@@ -1083,6 +1083,7 @@ class KVCacheConfigurator:
         The pool factories decide whether a decline refuses the boot.
         Asymmetric K/V rows fuse only on backends that carry v_head_dim through
         to the kernel."""
+        from sglang.srt.mem_cache.kv.layout.base import _store_dtype_for
         from sglang.srt.mem_cache.layout.fused_draft import (
             LAYER_FULL,
             FusedDraftDecision,
@@ -1090,7 +1091,6 @@ class KVCacheConfigurator:
             draft_kv_profile,
             place_fused_draft,
         )
-        from sglang.srt.mem_cache.unified_memory_pool import _store_dtype_for
 
         aux = self.spec_aux_config
         host_has_fusable_full_pool = (
@@ -1310,10 +1310,8 @@ class KVCacheConfigurator:
         )
 
     def _swa_host_spec(self, region):
-        from sglang.srt.mem_cache.unified_memory_pool import (
-            MHASubPoolSpec,
-            _store_dtype_for,
-        )
+        from sglang.srt.mem_cache.kv.layout.base import _store_dtype_for
+        from sglang.srt.mem_cache.kv.layout.mha import MHASubPoolSpec
 
         assert self.is_hybrid_swa, "only a hybrid-SWA host builds an swa sub-pool"
         geometry = self._unified_swa_head_geometry()
@@ -1329,11 +1327,9 @@ class KVCacheConfigurator:
         )
 
     def _full_host_spec(self, region):
-        from sglang.srt.mem_cache.unified_memory_pool import (
-            MHASubPoolSpec,
-            MLASubPoolSpec,
-            _store_dtype_for,
-        )
+        from sglang.srt.mem_cache.kv.layout.base import _store_dtype_for
+        from sglang.srt.mem_cache.kv.layout.mha import MHASubPoolSpec
+        from sglang.srt.mem_cache.kv.layout.mla import MLASubPoolSpec
 
         # This runner's OWN layers, exactly as each pool factory slices them:
         # the whole-model split would also count other pipeline ranks'.
