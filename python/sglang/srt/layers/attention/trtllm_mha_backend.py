@@ -1032,7 +1032,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         )
 
         cache_loc = self._get_layer_cache_loc(layer, forward_batch)
-        k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+        k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
         # Layers without checkpoint KV scales fall back to the backend-owned
         # float32 ones tensor; letting the op synthesize one costs a fill
         # kernel per layer per forward, baked into the captured graph.
@@ -1558,7 +1558,6 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             save_kv_cache, k, forward_batch
         )
         use_fused_qkv = use_fused_fp8_path and not self.is_xqa_impl
-        pool = self.token_to_kv_pool
 
         if use_fused_fp8_path:
             fused_q = self._fused_fp8_qkv_kv_cache(
@@ -1570,7 +1569,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             v = None
         else:
             if save_kv_cache and k is not None:
-                self.token_to_kv_pool.set_kv_buffer(
+                self.kv_layers.layer(layer.layer_id).store(
                     layer,
                     KVWriteLoc.for_batch(
                         forward_batch,
@@ -1601,7 +1600,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         if self.is_nvfp4_kvcache:
             kv_cache, kv_cache_block_scales = self._get_nvfp4_decode_kv_cache(layer)
         else:
-            k_cache, v_cache = pool.get_kv_buffer(layer.layer_id)
+            k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
             kv_cache = self._reshape_paged_kv_cache(
                 k_cache, v_cache, layer, layer.head_dim
             )
@@ -1688,7 +1687,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                         swa_loc=self.forward_metadata.swa_out_cache_loc,
                     )
                 else:
-                    self.token_to_kv_pool.set_kv_buffer(
+                    self.kv_layers.layer(layer.layer_id).store(
                         layer,
                         KVWriteLoc.for_batch(
                             forward_batch,
@@ -1724,9 +1723,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         else:
             # Native pool format is NHD:
             # [num_pages, page_size, num_kv_heads, head_dim].
-            k_cache_raw, v_cache_raw = self.token_to_kv_pool.get_kv_buffer(
-                layer.layer_id
-            )
+            k_cache_raw, v_cache_raw = self.kv_layers.read(layer.layer_id).kv()
             if not self.use_fmha_v2 or uses_decode_kernel:
                 # Decode and SM100 batch_context kernels require HND layout.
                 k_cache, v_cache = self._reshape_paged_kv_cache(
