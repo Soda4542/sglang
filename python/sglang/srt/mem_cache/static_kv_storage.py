@@ -321,6 +321,7 @@ class StaticKVStorage:
                 )
             )
         return tuple(usage)
+
     # -- what a PD peer registers --
 
     def view(self, sub_pool: str) -> Any:
@@ -345,6 +346,14 @@ class StaticKVStorage:
 
     def sub_pool_names(self) -> Tuple[str, ...]:
         return (self.owner,)
+
+    def tree_components(self) -> Tuple[str, ...]:
+        shape = self._shape
+        return (
+            ("FULL",)
+            + (("SWA",) if shape.has_window else ())
+            + (("MAMBA",) if shape.has_state else ())
+        )
 
     def add_pin_source(
         self, sub_pools: Sequence[str], busy: Callable[[], bool]
