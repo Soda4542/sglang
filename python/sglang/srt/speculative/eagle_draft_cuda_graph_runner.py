@@ -498,7 +498,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
                 spec_info.capture_hidden_mode if spec_info else CaptureHiddenMode.NULL
             ),
         )
-        self.model_runner.kv_index_translator.bind_runner_slots(forward_batch)
+        self.model_runner.runner_ids.bind_runner_slots(forward_batch)
 
         def run_once():
             self.draft_attn_backend.init_forward_metadata_in_graph(forward_batch)
