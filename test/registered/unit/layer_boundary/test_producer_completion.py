@@ -2,7 +2,7 @@
 
 import unittest
 from collections.abc import Mapping
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 from functools import partial
 from types import FunctionType, MethodType, SimpleNamespace
@@ -339,7 +339,8 @@ class TestProducerCompletion(CustomTestCase):
     def test_carried_finalize_uses_only_candidates_for_its_completion_group(self):
         events = []
 
-        class Completion(DeferredFinalize, frozen=True):
+        @dataclass(frozen=True)
+        class Completion(DeferredFinalize):
             def complete(self):
                 events.append("complete")
                 return torch.full((2, 4), 3.0)

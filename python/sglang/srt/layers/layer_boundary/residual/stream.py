@@ -13,17 +13,24 @@
 # ==============================================================================
 """One forward's residual and its producer's outstanding contribution."""
 
+import dataclasses
 from typing import Callable, Optional, Union
 
-import msgspec
 import torch
 
 from sglang.srt.layers.layer_boundary.layout import SumGroup, _sum_group
 from sglang.srt.layers.layer_boundary.output import DeferredFinalize, UnreducedOutput
 from sglang.srt.layers.layer_boundary.residual import ResidualUpdate
 
+# These carriers are constructed inside the tc_piecewise compiled region
+# (fullgraph torch.compile of the language-model forward). Dynamo cannot replay
+# msgspec.Struct construction -- its C-level __new__ is untraceable and probing
+# object.__new__(cls) raises "not safe" -- so they must stay plain dataclasses,
+# whose generated __init__ Dynamo traces directly.
 
-class DeclaredSum(msgspec.Struct, frozen=True):
+
+@dataclasses.dataclass(frozen=True)
+class DeclaredSum:
     """A sum every output owes to its declared input edge. complete_sum is
     the producer's custom implementation bound to this invocation, or None
     for the ordinary group all-reduce."""
@@ -37,7 +44,8 @@ class DeclaredSum(msgspec.Struct, frozen=True):
         return _sum_group(self.group).all_reduce(value)
 
 
-class Contribution(msgspec.Struct):
+@dataclasses.dataclass
+class Contribution:
     """Own a producer's output, residual update and outstanding completion.
 
     Fields:
@@ -77,7 +85,8 @@ class Contribution(msgspec.Struct):
         self.update = None
 
 
-class OwedOutput(msgspec.Struct, frozen=True):
+@dataclasses.dataclass(frozen=True)
+class OwedOutput:
     """Opaque model-facing handle. Only its boundary may read the contribution."""
 
     contribution: Contribution
@@ -218,7 +227,7 @@ class ResidualStream:
         elif isinstance(pending.owed, DeclaredSum):
             value = pending.owed.complete(pending.value.clone())
         elif isinstance(pending.owed, UnreducedOutput):
-            value = msgspec.structs.replace(
+            value = dataclasses.replace(
                 pending.owed, partial=pending.value.clone()
             ).complete()
         else:

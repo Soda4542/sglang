@@ -1,3 +1,4 @@
+import dataclasses
 import unittest
 import weakref
 from types import SimpleNamespace
@@ -17,10 +18,14 @@ from sglang.srt.layers.layer_boundary import (
     bind_entry,
 )
 from sglang.srt.layers.layer_boundary.contracts import BatchVariant, StageKind
+from sglang.srt.layers.layer_boundary.exit import ExitDecision
+from sglang.srt.layers.layer_boundary.fusions.moe_finalize import MoeDeferredFinalize
 from sglang.srt.layers.layer_boundary.output import UnreducedOutput
 from sglang.srt.layers.layer_boundary.residual import batch as residual_batch
 from sglang.srt.layers.layer_boundary.residual.add_norm import PLAIN_ADD
 from sglang.srt.layers.layer_boundary.residual.stream import (
+    Contribution,
+    DeclaredSum,
     OwedOutput,
     ResidualStream,
 )
@@ -519,6 +524,131 @@ class TestBatchStageOwnership(CustomTestCase):
         batch.start(a)
         self.assertIsNone(batch.stream_of(a).pending)
         self.assertIsNotNone(batch.stream_of(b).residual)
+
+
+class _TraceableGroup:
+    """An all-reduce group dynamo can inline: a plain method on a plain object."""
+
+    def all_reduce(self, value):
+        return value * 2
+
+
+_TRACEABLE_GROUP = _TraceableGroup()
+
+
+def _complete_passthrough(output, residual):
+    return output, residual
+
+
+def _finish_passthrough():
+    return torch.zeros(1)
+
+
+class TestCarrierDynamoTraceability(CustomTestCase):
+    """Guard the bug behind the MiniMax-M3 TP16 tc_piecewise capture crash.
+
+    tc_piecewise compiles the language-model forward with
+    torch.compile(fullgraph=True), and the layer-boundary carriers are both
+    constructed and completed inside that region. As frozen msgspec.Structs
+    their C-level __new__ was untraceable, so capture died on every rank with
+    "Unsupported object.__new__ user-defined class construction". The carriers
+    must stay dataclasses with a standard __new__, and Contribution must stay
+    mutable because complete() reassigns value/owed.
+    """
+
+    def test_carriers_construct_under_fullgraph_compile(self):
+        def build(partial_value):
+            declared = DeclaredSum(SumGroup.ATTN_TP)
+            contribution = Contribution(partial_value, None, declared)
+            owed = OwedOutput(contribution)
+            unreduced = UnreducedOutput(partial_value, group=_TRACEABLE_GROUP)
+            decision = ExitDecision(True, True, _complete_passthrough)
+            handoff = MoeDeferredFinalize(
+                partial_value,
+                partial_value,
+                partial_value,
+                partial_value,
+                2,
+                _finish_passthrough,
+            )
+            return (
+                torch.compiler.is_compiling(),
+                declared.group is SumGroup.ATTN_TP,
+                owed.contribution is contribution,
+                unreduced.partial,
+                decision.defer_moe_finalize,
+                handoff.m,
+            )
+
+        value = torch.ones(2, 4)
+        # backend="eager": the regression fires at dynamo trace time, so no
+        # codegen is needed to reproduce it.
+        compiling, is_attn_tp, same_contribution, partial, defer_flag, m = (
+            torch.compile(backend="eager", fullgraph=True)(build)(value)
+        )
+        self.assertTrue(compiling)  # fails vacuously if dynamo is disabled
+        self.assertTrue(is_attn_tp)
+        self.assertTrue(same_contribution)
+        torch.testing.assert_close(partial, value)
+        self.assertTrue(defer_flag)
+        self.assertEqual(m, 2)
+
+    def test_unreduced_output_complete_runs_under_fullgraph_compile(self):
+        def complete(value):
+            contribution = Contribution(
+                value, None, UnreducedOutput(value, group=_TRACEABLE_GROUP)
+            )
+            completed = contribution.complete()
+            return (
+                torch.compiler.is_compiling(),
+                completed,
+                contribution.value,
+                contribution.owed is None,
+            )
+
+        compiling, completed, stored, cleared = torch.compile(
+            backend="eager", fullgraph=True
+        )(complete)(torch.ones(2, 4))
+        self.assertTrue(compiling)
+        torch.testing.assert_close(completed, torch.full((2, 4), 2.0))
+        torch.testing.assert_close(stored, torch.full((2, 4), 2.0))
+        self.assertTrue(cleared)
+
+    def test_declared_sum_complete_runs_under_fullgraph_compile(self):
+        def complete(value):
+            contribution = Contribution(value, None, DeclaredSum(SumGroup.TP))
+            completed = contribution.complete()
+            return torch.compiler.is_compiling(), completed, contribution.owed is None
+
+        with patch(
+            "sglang.srt.layers.layer_boundary.residual.stream._sum_group",
+            lambda group: _TRACEABLE_GROUP,
+        ):
+            compiling, completed, cleared = torch.compile(
+                backend="eager", fullgraph=True
+            )(complete)(torch.ones(2, 4))
+        self.assertTrue(compiling)
+        torch.testing.assert_close(completed, torch.full((2, 4), 2.0))
+        self.assertTrue(cleared)
+
+    def test_carriers_keep_the_dynamo_construction_contract(self):
+        # Dynamo constructs frozen dataclasses through a dedicated branch that
+        # requires a standard __new__; msgspec.Struct or a custom __new__ falls
+        # back to an object.__new__ probe that fails capture under fullgraph.
+        for cls in (
+            DeclaredSum,
+            OwedOutput,
+            UnreducedOutput,
+            ExitDecision,
+            MoeDeferredFinalize,
+        ):
+            with self.subTest(cls=cls.__name__):
+                self.assertTrue(dataclasses.is_dataclass(cls))
+                self.assertTrue(cls.__dataclass_params__.frozen)
+                self.assertIs(cls.__new__, object.__new__)
+        self.assertTrue(dataclasses.is_dataclass(Contribution))
+        self.assertFalse(Contribution.__dataclass_params__.frozen)
+        self.assertIs(Contribution.__new__, object.__new__)
 
 
 if __name__ == "__main__":

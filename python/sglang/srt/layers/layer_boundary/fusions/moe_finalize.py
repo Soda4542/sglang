@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Callable
 
 import torch
@@ -9,7 +10,8 @@ import torch
 from sglang.srt.layers.layer_boundary.output import DeferredFinalize
 
 
-class MoeDeferredFinalize(DeferredFinalize, frozen=True):
+@dataclasses.dataclass(frozen=True)
+class MoeDeferredFinalize(DeferredFinalize):
     """Unfinalized routed output plus the separately gated shared contribution.
     The next layer's fused finalize + AR + add + norm takes it; ``finish`` is
     the MoE's own unfused tail, for any other reader."""

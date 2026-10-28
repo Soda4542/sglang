@@ -1,13 +1,13 @@
 """Push-plane provider selection, fallback, and terminal residual ownership."""
 
 import sys
+from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
-from msgspec.structs import replace
 
 from sglang.srt.layers.aux_hidden_states import AuxHiddenStateList
 from sglang.srt.layers.layer_boundary import (

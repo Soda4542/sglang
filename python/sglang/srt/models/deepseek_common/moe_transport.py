@@ -1,5 +1,6 @@
 """MoE operand transport and completion, preserving source residual rows."""
 
+import dataclasses
 from contextlib import contextmanager, nullcontext
 
 import torch
@@ -336,7 +337,8 @@ def _tbo_wait_moe_output(local, event, shared_local):
     return local + shared_local[: local.shape[0]] if shared_local is not None else local
 
 
-class MoeFinalize(DeferredFinalize, frozen=True):
+@dataclasses.dataclass(frozen=True)
+class MoeFinalize(DeferredFinalize):
     pieces: object = None
     partial: object = None
 
