@@ -1253,7 +1253,7 @@ class AiterAttnBackend(AttentionBackend):
             if swa_page_table is not None:
                 pt = swa_page_table
 
-        k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+        k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
         q_u = q.contiguous().view(-1, layer.tp_q_head_num, layer.qk_head_dim)
         o = q_u.new_empty(
             (q_u.shape[0], layer.tp_q_head_num, layer.v_head_dim),
@@ -1587,7 +1587,7 @@ class AiterAttnBackend(AttentionBackend):
         forward_batch: ForwardBatch,
         k_descale,
     ):
-        k_buffer = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
+        k_buffer = self.kv_layers.read(layer.layer_id).key()
         q = q.view(-1, layer.tp_q_head_num, layer.qk_head_dim)
         max_q_len = self.forward_metadata.max_q_len or 1
 
@@ -1761,9 +1761,7 @@ class AiterAttnBackend(AttentionBackend):
         )
         _, lse = mla_decode_fwd(
             q_in,
-            self.token_to_kv_pool.get_key_buffer(layer.layer_id).view(
-                -1, 1, 1, layer.qk_head_dim
-            ),
+            self.kv_layers.read(layer.layer_id).key().view(-1, 1, 1, layer.qk_head_dim),
             out,
             fm.qo_indptr,
             kv_indptr,
@@ -1860,7 +1858,7 @@ class AiterAttnBackend(AttentionBackend):
 
         out_a, lse_a = mla_gluon_decode(
             q=q.view(n_rows, num_heads, layer.qk_head_dim),
-            k_buffer=self.token_to_kv_pool.get_key_buffer(layer.layer_id),
+            k_buffer=self.kv_layers.read(layer.layer_id).key(),
             layer=layer,
             kv_indices=fm.verify_token_table,
             kv_indptr=seqused_k,
@@ -3716,7 +3714,7 @@ class AiterAttnBackend(AttentionBackend):
                 # launch_reshape_and_cache_flash; always route through
                 # set_kv_buffer which dispatches to the SHUFFLE 5D writer.
                 if self.kv_cache_is_vectorized_5d:
-                    self.token_to_kv_pool.set_kv_buffer(
+                    self.kv_layers.layer(layer.layer_id).store(
                         layer,
                         KVWriteLoc.for_layer(
                             forward_batch,
@@ -3738,9 +3736,7 @@ class AiterAttnBackend(AttentionBackend):
                     and self.use_sliding_window_kv_pool
                 ):
                     token_to_kv_pool = self.token_to_kv_pool
-                    k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(
-                        layer.layer_id
-                    )
+                    k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
                     slot_mapping_swa = self.swa_kv_pool.full_to_swa_index_mapping
 
                     launch_reshape_and_cache_flash(
@@ -3764,14 +3760,14 @@ class AiterAttnBackend(AttentionBackend):
                 elif self.use_mla:
                     if self.dcp_world_size > 1:
                         kv_lora_rank = v.shape[-1]
-                        self.token_to_kv_pool.set_mla_kv_buffer(
+                        self.kv_layers.layer(layer.layer_id).store_mla(
                             layer,
                             KVWriteLoc.for_layer(forward_batch, layer),
                             k[..., :kv_lora_rank],
                             k[..., kv_lora_rank:],
                         )
                     else:
-                        self.token_to_kv_pool.set_kv_buffer(
+                        self.kv_layers.layer(layer.layer_id).store(
                             layer,
                             KVWriteLoc.for_layer(forward_batch, layer),
                             k,
@@ -3779,9 +3775,7 @@ class AiterAttnBackend(AttentionBackend):
                         )
                 elif self._use_fused_fp8_kv_write(layer):
                     # FP8: fuse bf16->fp8 cast + paged write in one kernel.
-                    k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(
-                        layer.layer_id
-                    )
+                    k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
                     launch_reshape_and_cache_flash(
                         k.view(-1, layer.tp_k_head_num, layer.qk_head_dim),
                         v.view(-1, layer.tp_v_head_num, layer.v_head_dim),
@@ -3796,7 +3790,7 @@ class AiterAttnBackend(AttentionBackend):
                         v_scale=v_descale,
                     )
                 else:
-                    self.token_to_kv_pool.set_kv_buffer(
+                    self.kv_layers.layer(layer.layer_id).store(
                         layer,
                         KVWriteLoc.for_layer(
                             forward_batch,
@@ -3815,8 +3809,8 @@ class AiterAttnBackend(AttentionBackend):
             kv_indptr = self.forward_metadata.kv_indptr
             kv_indices = self.forward_metadata.kv_indices
             qo_indptr = self.forward_metadata.qo_indptr
-            K_Buffer = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
-            V_Buffer = self.token_to_kv_pool.get_value_buffer(layer.layer_id)
+            K_Buffer = self.kv_layers.read(layer.layer_id).key()
+            V_Buffer = self.kv_layers.read(layer.layer_id).value()
             kv_lora_rank = V_Buffer.shape[-1]
             qk_rope_head_dim = K_Buffer.shape[-1] - kv_lora_rank
 
@@ -4127,9 +4121,7 @@ class AiterAttnBackend(AttentionBackend):
                     self._use_unified_verify
                     and forward_batch.forward_mode.is_target_verify()
                 ):
-                    k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(
-                        layer.layer_id
-                    )
+                    k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
                     page_table = self.forward_metadata.kv_indices
                     max_kv_len = page_table.shape[1] * self.page_size
 
@@ -4247,8 +4239,8 @@ class AiterAttnBackend(AttentionBackend):
                     k.contiguous(),
                     v.contiguous(),
                     o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
-                    self.token_to_kv_pool.get_key_buffer(layer.layer_id),
-                    self.token_to_kv_pool.get_value_buffer(layer.layer_id),
+                    self.kv_layers.read(layer.layer_id).key(),
+                    self.kv_layers.read(layer.layer_id).value(),
                     self.forward_metadata.qo_indptr,
                     self.forward_metadata.kv_indptr,
                     self.forward_metadata.kv_indices,
@@ -4281,7 +4273,7 @@ class AiterAttnBackend(AttentionBackend):
                     )
                 else:
                     o = torch.empty_like(q)
-                k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+                k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
                 page_table, swa_page_table = self._build_unified_page_table_from_spec(
                     self.forward_metadata, bs
                 )
@@ -4397,7 +4389,7 @@ class AiterAttnBackend(AttentionBackend):
                 and not self.kv_cache_is_vectorized_5d
                 and self.forward_metadata.max_kv_len is not None
             ):
-                k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+                k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
                 tok_idx, cu_k = self._asm_context_prefill_indices(
                     forward_batch, forward_batch.batch_size, k_cache.shape[0]
                 )
@@ -4464,7 +4456,7 @@ class AiterAttnBackend(AttentionBackend):
                 and not paged_asm_available
             ):
                 bs = forward_batch.batch_size
-                k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+                k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
                 tok_idx, cu_k = self._asm_context_prefill_indices(
                     forward_batch, bs, k_cache.shape[0]
                 )
@@ -4582,7 +4574,7 @@ class AiterAttnBackend(AttentionBackend):
                 q = q.to(fp8_dtype)
                 q_descale = layer.k_scale if layer.k_scale is not None else self.k_scale
 
-            k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+            k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
 
             page_table = self.forward_metadata.kv_indices
             if (
@@ -4674,7 +4666,7 @@ class AiterAttnBackend(AttentionBackend):
         if save_kv_cache:
             # SHUFFLE 5D pool path — see forward_extend for rationale.
             if self.kv_cache_is_vectorized_5d:
-                self.token_to_kv_pool.set_kv_buffer(
+                self.kv_layers.layer(layer.layer_id).store(
                     layer,
                     KVWriteLoc.for_batch(
                         forward_batch,
@@ -4692,7 +4684,7 @@ class AiterAttnBackend(AttentionBackend):
             # like full_to_swa_index_mapping.
             elif self.use_triton_unified_attention and self.use_sliding_window_kv_pool:
                 token_to_kv_pool = self.token_to_kv_pool
-                k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+                k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
                 slot_mapping_swa = token_to_kv_pool.full_to_swa_index_mapping
 
                 launch_reshape_and_cache_flash(
@@ -4711,7 +4703,7 @@ class AiterAttnBackend(AttentionBackend):
                 )
             elif self.use_mla:
                 # MLA pool has its own set_kv_buffer (no scale args).
-                self.token_to_kv_pool.set_kv_buffer(
+                self.kv_layers.layer(layer.layer_id).store(
                     layer,
                     KVWriteLoc.for_batch(forward_batch),
                     k,
@@ -4720,7 +4712,9 @@ class AiterAttnBackend(AttentionBackend):
             elif self._use_fused_fp8_kv_write(layer):
                 # FP8: fuse bf16->fp8 cast + paged write in one kernel.
                 token_to_kv_pool = self.token_to_kv_pool
-                k_cache, v_cache = token_to_kv_pool.get_kv_buffer(layer.layer_id)
+                k_cache, v_cache = token_to_kv_pool.layer_router.read(
+                    layer.layer_id
+                ).kv()
                 launch_reshape_and_cache_flash(
                     k.view(-1, layer.tp_k_head_num, layer.qk_head_dim),
                     v.view(-1, layer.tp_v_head_num, layer.v_head_dim),
@@ -4735,7 +4729,7 @@ class AiterAttnBackend(AttentionBackend):
                     v_scale=v_descale,
                 )
             else:
-                self.token_to_kv_pool.set_kv_buffer(
+                self.kv_layers.layer(layer.layer_id).store(
                     layer,
                     KVWriteLoc.for_batch(
                         forward_batch,
@@ -4749,7 +4743,7 @@ class AiterAttnBackend(AttentionBackend):
 
         if self.use_mla:
             if self.dcp_world_size > 1 and not forward_batch.forward_mode.is_idle():
-                k_buffer = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
+                k_buffer = self.kv_layers.read(layer.layer_id).key()
                 return self._forward_decode_dcp(q, k_buffer, layer, k_descale)
 
             o = self._forward_mla_decode(q, layer, forward_batch, k_descale)
@@ -4757,7 +4751,7 @@ class AiterAttnBackend(AttentionBackend):
         else:
             self.logits_soft_cap = layer.logit_cap
 
-            k_cache, v_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+            k_cache, v_cache = self.kv_layers.read(layer.layer_id).kv()
 
             if layer.qk_head_dim != layer.v_head_dim:
                 o = q.new_empty(
